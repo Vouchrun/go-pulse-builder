@@ -49,6 +49,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/eth"
+	"github.com/ethereum/go-ethereum/eth/block-validation"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/filters"
 	"github.com/ethereum/go-ethereum/eth/gasprice"
@@ -540,6 +541,23 @@ var (
 	MinerPendingFeeRecipientFlag = &cli.StringFlag{
 		Name:     "miner.pending.feeRecipient",
 		Usage:    "0x prefixed public address for the pending block producer (not used for actual block production)",
+		Category: flags.MinerCategory,
+	}
+
+	// Block-validation (flashbots) settings
+	BuilderBlockValidationUseBalanceDiff = &cli.BoolFlag{
+		Name:     "builder.validation_use_balance_diff",
+		Usage:    "Use the fee recipient balance difference to validate the proposer payment in flashbots block validation",
+		Category: flags.MinerCategory,
+	}
+	BuilderBlockValidationExcludeWithdrawals = &cli.BoolFlag{
+		Name:     "builder.validation_exclude_withdrawals",
+		Usage:    "Exclude withdrawals to the fee recipient from the balance difference in flashbots block validation",
+		Category: flags.MinerCategory,
+	}
+	BuilderBlacklist = &cli.StringFlag{
+		Name:     "builder.blacklist",
+		Usage:    "Path to a JSON file with a list of blacklisted addresses for flashbots block validation",
 		Category: flags.MinerCategory,
 	}
 
@@ -1597,6 +1615,9 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	setTxPool(ctx, &cfg.TxPool)
 	setBlobPool(ctx, &cfg.BlobPool)
 	setMiner(ctx, &cfg.Miner)
+	cfg.ValidationUseBalanceDiff = ctx.Bool(BuilderBlockValidationUseBalanceDiff.Name)
+	cfg.ValidationExcludeWithdrawals = ctx.Bool(BuilderBlockValidationExcludeWithdrawals.Name)
+	cfg.BlacklistSourceFilePath = ctx.String(BuilderBlacklist.Name)
 	setRequiredBlocks(ctx, cfg)
 
 	// Cap the cache allowance and tune the garbage collector
@@ -2003,6 +2024,14 @@ func RegisterEthService(stack *node.Node, cfg *ethconfig.Config) (*eth.EthAPIBac
 	backend, err := eth.New(stack, cfg)
 	if err != nil {
 		Fatalf("Failed to register the Ethereum service: %v", err)
+	}
+	// Register the flashbots block-validation namespace (relay validation node).
+	if err := blockvalidation.Register(stack, backend, blockvalidation.BlockValidationConfig{
+		BlacklistSourceFilePath: cfg.BlacklistSourceFilePath,
+		UseBalanceDiffProfit:    cfg.ValidationUseBalanceDiff,
+		ExcludeWithdrawals:      cfg.ValidationExcludeWithdrawals,
+	}); err != nil {
+		Fatalf("Failed to register the block-validation service: %v", err)
 	}
 	stack.RegisterAPIs(tracers.APIs(backend.APIBackend))
 	return backend.APIBackend, backend

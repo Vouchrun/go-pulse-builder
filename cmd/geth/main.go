@@ -118,6 +118,9 @@ var (
 		utils.MinerRecommitIntervalFlag,
 		utils.MinerPendingFeeRecipientFlag,
 		utils.MinerNewPayloadTimeoutFlag, // deprecated
+		utils.BuilderBlockValidationUseBalanceDiff,
+		utils.BuilderBlockValidationExcludeWithdrawals,
+		utils.BuilderBlacklist,
 		utils.NATFlag,
 		utils.NoDiscoverFlag,
 		utils.DiscoveryV4Flag,

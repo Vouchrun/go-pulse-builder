@@ -21,6 +21,8 @@ import (
 	"math/big"
 	"slices"
 
+	"github.com/attestantio/go-eth2-client/spec/bellatrix"
+	"github.com/attestantio/go-eth2-client/spec/capella"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -373,4 +375,86 @@ type ClientVersionV1 struct {
 
 func (v *ClientVersionV1) String() string {
 	return fmt.Sprintf("%s-%s-%s-%s", v.Code, v.Name, v.Version, v.Commit)
+}
+
+// ExecutionPayloadV1ToBlock converts an attestantio bellatrix execution payload
+// to a block. Ported from the Vouch builder fork (flashbots block-validation
+// slice) for the relay's flashbots_validateBuilderSubmissionV1 endpoint.
+func ExecutionPayloadV1ToBlock(payload *bellatrix.ExecutionPayload) (*types.Block, error) {
+	// base fee per gas is stored little-endian but we need it
+	// big-endian for big.Int.
+	var baseFeePerGasBytes [32]byte
+	for i := 0; i < 32; i++ {
+		baseFeePerGasBytes[i] = payload.BaseFeePerGas[32-1-i]
+	}
+	baseFeePerGas := new(big.Int).SetBytes(baseFeePerGasBytes[:])
+
+	txs := make([][]byte, len(payload.Transactions))
+	for i, txHexBytes := range payload.Transactions {
+		txs[i] = txHexBytes
+	}
+	executableData := ExecutableData{
+		ParentHash:    common.Hash(payload.ParentHash),
+		FeeRecipient:  common.Address(payload.FeeRecipient),
+		StateRoot:     common.Hash(payload.StateRoot),
+		ReceiptsRoot:  common.Hash(payload.ReceiptsRoot),
+		LogsBloom:     payload.LogsBloom[:],
+		Random:        common.Hash(payload.PrevRandao),
+		Number:        payload.BlockNumber,
+		GasLimit:      payload.GasLimit,
+		GasUsed:       payload.GasUsed,
+		Timestamp:     payload.Timestamp,
+		ExtraData:     payload.ExtraData,
+		BaseFeePerGas: baseFeePerGas,
+		BlockHash:     common.Hash(payload.BlockHash),
+		Transactions:  txs,
+	}
+	return ExecutableDataToBlock(executableData, nil, nil, nil)
+}
+
+// ExecutionPayloadV2ToBlock converts an attestantio capella execution payload
+// to a block. Ported from the Vouch builder fork (flashbots block-validation
+// slice) for the relay's flashbots_validateBuilderSubmissionV2 endpoint - the
+// live path on PulseChain (Capella-era).
+func ExecutionPayloadV2ToBlock(payload *capella.ExecutionPayload) (*types.Block, error) {
+	// base fee per gas is stored little-endian but we need it
+	// big-endian for big.Int.
+	var baseFeePerGasBytes [32]byte
+	for i := 0; i < 32; i++ {
+		baseFeePerGasBytes[i] = payload.BaseFeePerGas[32-1-i]
+	}
+	baseFeePerGas := new(big.Int).SetBytes(baseFeePerGasBytes[:])
+
+	txs := make([][]byte, len(payload.Transactions))
+	for i, txHexBytes := range payload.Transactions {
+		txs[i] = txHexBytes
+	}
+
+	withdrawals := make([]*types.Withdrawal, len(payload.Withdrawals))
+	for i, withdrawal := range payload.Withdrawals {
+		withdrawals[i] = &types.Withdrawal{
+			Index:     uint64(withdrawal.Index),
+			Validator: uint64(withdrawal.ValidatorIndex),
+			Address:   common.Address(withdrawal.Address),
+			Amount:    uint64(withdrawal.Amount),
+		}
+	}
+	executableData := ExecutableData{
+		ParentHash:    common.Hash(payload.ParentHash),
+		FeeRecipient:  common.Address(payload.FeeRecipient),
+		StateRoot:     common.Hash(payload.StateRoot),
+		ReceiptsRoot:  common.Hash(payload.ReceiptsRoot),
+		LogsBloom:     payload.LogsBloom[:],
+		Random:        common.Hash(payload.PrevRandao),
+		Number:        payload.BlockNumber,
+		GasLimit:      payload.GasLimit,
+		GasUsed:       payload.GasUsed,
+		Timestamp:     payload.Timestamp,
+		ExtraData:     payload.ExtraData,
+		BaseFeePerGas: baseFeePerGas,
+		BlockHash:     common.Hash(payload.BlockHash),
+		Transactions:  txs,
+		Withdrawals:   withdrawals,
+	}
+	return ExecutableDataToBlock(executableData, nil, nil, nil)
 }

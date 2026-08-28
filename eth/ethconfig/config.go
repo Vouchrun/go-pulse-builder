@@ -134,6 +134,11 @@ type Config struct {
 	// Mining options
 	Miner miner.Config
 
+	// Block-validation (flashbots) options
+	ValidationUseBalanceDiff  bool   // Use fee-recipient balance difference to validate proposer payment
+	ValidationExcludeWithdrawals bool // Exclude withdrawals to the fee recipient from the balance difference
+	BlacklistSourceFilePath   string // Path to a JSON file with blacklisted addresses for block validation
+
 	// Transaction pool options
 	TxPool   legacypool.Config
 	BlobPool blobpool.Config
