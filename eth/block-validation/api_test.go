@@ -12,7 +12,6 @@ import (
 	"github.com/attestantio/go-builder-client/api"
 	builderApiBellatrix "github.com/attestantio/go-builder-client/api/bellatrix"
 	builderApiCapella "github.com/attestantio/go-builder-client/api/capella"
-	builderApiDeneb "github.com/attestantio/go-builder-client/api/deneb"
 	builderApiV1 "github.com/attestantio/go-builder-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec"
 	"github.com/attestantio/go-eth2-client/spec/bellatrix"
@@ -296,139 +295,10 @@ func TestValidateBuilderSubmissionV2(t *testing.T) {
 }
 
 func TestValidateBuilderSubmissionV3(t *testing.T) {
-	genesis, blocks := generateMergeChain(10, true)
-
-	// Set cancun time to last block + 5 seconds
-	time := blocks[len(blocks)-1].Time() + 5
-	genesis.Config.ShanghaiTime = &time
-	genesis.Config.CancunTime = &time
-	os.Setenv("BUILDER_TX_SIGNING_KEY", testBuilderKeyHex)
-
-	n, ethservice := startEthService(t, genesis, blocks)
-		defer n.Close()
-
-	api := NewBlockValidationAPI(ethservice, nil, true, false)
-	parent := ethservice.BlockChain().CurrentHeader()
-
-	statedb, _ := ethservice.BlockChain().StateAt(parent.Root)
-	nonce := statedb.GetNonce(testAddr)
-
-	tx1, _ := types.SignTx(types.NewTransaction(nonce, common.Address{0x16}, big.NewInt(10), 21000, big.NewInt(2*params.InitialBaseFee), nil), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
-	ethservice.TxPool().Add([]*types.Transaction{tx1}, true)
-
-	cc, _ := types.SignTx(types.NewContractCreation(nonce+1, new(big.Int), 1000000, big.NewInt(2*params.InitialBaseFee), logCode), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
-	ethservice.TxPool().Add([]*types.Transaction{cc}, true)
-
-	baseFee := eip1559.CalcBaseFee(params.AllEthashProtocolChanges, parent)
-	tx2, _ := types.SignTx(types.NewTransaction(nonce+2, testAddr, big.NewInt(10), 21000, baseFee, nil), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
-	ethservice.TxPool().Add([]*types.Transaction{tx2}, true)
-
-	withdrawals := []*types.Withdrawal{
-		{
-			Index:     0,
-			Validator: 1,
-			Amount:    100,
-			Address:   testAddr,
-		},
-		{
-			Index:     1,
-			Validator: 1,
-			Amount:    100,
-			Address:   testAddr,
-		},
-	}
-
-	execData, err := assembleBlock(api, parent.Hash(), &engine.PayloadAttributes{
-		Timestamp:             parent.Time + 5,
-		Withdrawals:           withdrawals,
-		SuggestedFeeRecipient: testValidatorAddr,
-		BeaconRoot:            &common.Hash{42},
-	})
-	require.NoError(t, err)
-	require.EqualValues(t, len(execData.Withdrawals), 2)
-	require.EqualValues(t, len(execData.Transactions), 4)
-
-	payload, err := ExecutableDataToExecutionPayloadV3(execData)
-	require.NoError(t, err)
-
-	proposerAddr := bellatrix.ExecutionAddress{}
-	copy(proposerAddr[:], testValidatorAddr.Bytes())
-
-	blockRequest := &BuilderBlockValidationRequestV3{
-		SubmitBlockRequest: builderApiDeneb.SubmitBlockRequest{
-			Signature: phase0.BLSSignature{},
-			Message: &builderApiV1.BidTrace{
-				ParentHash:           phase0.Hash32(execData.ParentHash),
-				BlockHash:            phase0.Hash32(execData.BlockHash),
-				ProposerFeeRecipient: proposerAddr,
-				GasLimit:             execData.GasLimit,
-				GasUsed:              execData.GasUsed,
-				// This value is actual profit + 1, validation should fail
-				Value: uint256.NewInt(132912184722469),
-			},
-			ExecutionPayload: payload,
-			BlobsBundle: &builderApiDeneb.BlobsBundle{
-				Commitments: make([]deneb.KZGCommitment, 0),
-				Proofs:      make([]deneb.KZGProof, 0),
-				Blobs:       make([]deneb.Blob, 0),
-			},
-		},
-		RegisteredGasLimit:    execData.GasLimit,
-		ParentBeaconBlockRoot: common.Hash{42},
-	}
-
-	require.ErrorContains(t, api.ValidateBuilderSubmissionV3(blockRequest), "inaccurate payment")
-	blockRequest.Message.Value = uint256.NewInt(132912184722468)
-	require.NoError(t, api.ValidateBuilderSubmissionV3(blockRequest))
-
-	blockRequest.Message.GasLimit += 1
-	blockRequest.ExecutionPayload.GasLimit += 1
-	updatePayloadHashV3(t, blockRequest)
-
-	require.ErrorContains(t, api.ValidateBuilderSubmissionV3(blockRequest), "incorrect gas limit set")
-
-	blockRequest.Message.GasLimit -= 1
-	blockRequest.ExecutionPayload.GasLimit -= 1
-	updatePayloadHashV3(t, blockRequest)
-
-	// TODO: test with contract calling blacklisted address
-	// Test tx from blacklisted address
-	api.accessVerifier = &AccessVerifier{
-		blacklistedAddresses: map[common.Address]struct{}{
-			testAddr: {},
-		},
-	}
-	require.ErrorContains(t, api.ValidateBuilderSubmissionV3(blockRequest), "transaction from blacklisted address 0x71562b71999873DB5b286dF957af199Ec94617F7")
-
-	// Test tx to blacklisted address
-	api.accessVerifier = &AccessVerifier{
-		blacklistedAddresses: map[common.Address]struct{}{
-			{0x16}: {},
-		},
-	}
-	require.ErrorContains(t, api.ValidateBuilderSubmissionV3(blockRequest), "transaction to blacklisted address 0x1600000000000000000000000000000000000000")
-
-	api.accessVerifier = nil
-
-	blockRequest.Message.GasUsed = 10
-	require.ErrorContains(t, api.ValidateBuilderSubmissionV3(blockRequest), "incorrect GasUsed 10, expected 119996")
-	blockRequest.Message.GasUsed = execData.GasUsed
-
-	newTestKey, _ := crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f290")
-	invalidTx, err := types.SignTx(types.NewTransaction(0, common.Address{}, new(big.Int).Mul(big.NewInt(2e18), big.NewInt(10)), 19000, big.NewInt(2*params.InitialBaseFee), nil), types.LatestSigner(ethservice.BlockChain().Config()), newTestKey)
-	require.NoError(t, err)
-
-	txData, err := invalidTx.MarshalBinary()
-	require.NoError(t, err)
-	execData.Transactions = append(execData.Transactions, txData)
-
-	invalidPayload, err := ExecutableDataToExecutionPayloadV3(execData)
-	require.NoError(t, err)
-	invalidPayload.GasUsed = execData.GasUsed
-	copy(invalidPayload.ReceiptsRoot[:], hexutil.MustDecode("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")[:32])
-	blockRequest.ExecutionPayload = invalidPayload
-	updatePayloadHashV3(t, blockRequest)
-	require.ErrorContains(t, api.ValidateBuilderSubmissionV3(blockRequest), "could not apply tx 4", "insufficient funds for gas * price + value")
+	// PulseChain is Capella-era (Deneb disabled): V3 (blob-bearing) submissions are not supported.
+	api := NewBlockValidationAPI(nil, nil, false, false)
+	err := api.ValidateBuilderSubmissionV3(&BuilderBlockValidationRequestV3{})
+	require.ErrorContains(t, err, "unsupported on PulseChain")
 }
 
 func updatePayloadHash(t *testing.T, blockRequest *BuilderBlockValidationRequest) {
@@ -440,14 +310,6 @@ func updatePayloadHash(t *testing.T, blockRequest *BuilderBlockValidationRequest
 
 func updatePayloadHashV2(t *testing.T, blockRequest *BuilderBlockValidationRequestV2) {
 	blockHash, err := utils.ComputeBlockHash(&api.VersionedExecutionPayload{Version: spec.DataVersionCapella, Capella: blockRequest.ExecutionPayload}, nil)
-	require.NoError(t, err)
-	copy(blockRequest.Message.BlockHash[:], blockHash[:])
-	copy(blockRequest.ExecutionPayload.BlockHash[:], blockHash[:])
-}
-
-func updatePayloadHashV3(t *testing.T, blockRequest *BuilderBlockValidationRequestV3) {
-	root := phase0.Root(blockRequest.ParentBeaconBlockRoot)
-	blockHash, err := utils.ComputeBlockHash(&api.VersionedExecutionPayload{Version: spec.DataVersionDeneb, Deneb: blockRequest.ExecutionPayload}, &root)
 	require.NoError(t, err)
 	copy(blockRequest.Message.BlockHash[:], blockHash[:])
 	copy(blockRequest.ExecutionPayload.BlockHash[:], blockHash[:])
@@ -556,8 +418,9 @@ func assembleBlock(api *BlockValidationAPI, parentHash common.Hash, params *engi
 }
 
 func TestBlacklistLoad(t *testing.T) {
-	file, err := os.CreateTemp(".", "blacklist")
+	file, err := os.CreateTemp(t.TempDir(), "blacklist")
 	require.NoError(t, err)
+	file.Close()
 	defer os.Remove(file.Name())
 
 	av, err := NewAccessVerifierFromFile(file.Name())
@@ -1166,6 +1029,8 @@ func TestValidateBuilderSubmissionV2_ExcludeWithdrawals(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorContains(t, api.ValidateBuilderSubmissionV2(req), "payment")
 }
+
+
 
 
 
