@@ -29,6 +29,7 @@ require (
 	github.com/fatih/color v1.16.0
 	github.com/ferranbt/fastssz v0.1.4
 	github.com/fjl/gencodec v0.1.0
+	github.com/flashbots/go-boost-utils v1.8.0
 	github.com/fsnotify/fsnotify v1.6.0
 	github.com/gballet/go-libpcsclite v0.0.0-20190607065134-2772fd86a8ff
 	github.com/gofrs/flock v0.12.1
