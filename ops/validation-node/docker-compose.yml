@@ -1,0 +1,118 @@
+# Validation node stack (PulseChain) - official go-pulse EL (Vouchrun/go-pulse-builder)
+# + Lighthouse-Pulse CL
+#
+# Sits on the voter/relay server ALONGSIDE the production geth + lighthouse.
+# Every port below is offset from the production services (30303/8545/8551/6060
+# and 9000/9001/5052/5054) so the two stacks never collide.
+#
+# EL JSON-RPC is published ONLY to host loopback at 127.0.0.1:18546 - this is the
+# exact endpoint the relay's -blocksim flag expects (see relay-deploy-runbook).
+#
+# Before first start, create the JWT secret on the host (shared by EL + CL):
+#   mkdir -p /buildertest/validation-data
+#   openssl rand -hex 32 > /buildertest/validation-data/jwt.hex
+#
+# Build the EL image from the go-pulse-builder repo (pulse branch) first:
+#   docker build -t vouchrun/go-pulse-builder:pulse-<commit> .
+# This is the OFFICIAL go-pulse client with the flashbots validation namespace
+# ported on top.
+
+name: validation-pulse
+
+# Shared external network with the relay stack (ops/relay in mev-boost-relay).
+# Create it ONCE before starting either stack:
+#   docker network create mev-net
+# The relay reaches this stack by container name: validation-node:18546
+# (blocksim + registry RPC) and validation-consensus:5052 (beacon API).
+networks:
+  mev-net:
+    external: true
+
+volumes:
+  chaindata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /buildertest/validation-data   # disk mount point
+
+services:
+
+  validation-node:
+    image: vouchrun/go-pulse-builder:pulse-2da88359c
+    container_name: validation-node
+    restart: unless-stopped
+    stop_grace_period: 2m          # clean db shutdown
+    networks: [mev-net]
+    volumes:
+      - chaindata:/data
+    ports:
+      - "30307:30307/tcp"          # p2p (production geth uses 30303)
+      - "30307:30307/udp"          # discovery
+      - "127.0.0.1:18546:18546"    # JSON-RPC - localhost only; relay -blocksim target
+      - "127.0.0.1:6061:6060"      # metrics - scrape as host:6061 from Prometheus
+      # authrpc 8552 intentionally NOT published (internal only)
+    # Optional inbound P2P (uncomment and add to command when wanted):
+    #   --nat=extip:<VOTER_SERVER_PUBLIC_IP>
+    command: >
+      --pulsechain
+      --datadir=/data
+      --syncmode=snap
+      --cache=4096
+      --port=30307
+      --maxpeers=100
+      --authrpc.jwtsecret=/data/jwt.hex
+      --authrpc.addr=0.0.0.0
+      --authrpc.port=8552
+      --authrpc.vhosts=*
+      --http
+      --http.addr=0.0.0.0
+      --http.port=18546
+      --http.api=eth,net,web3,flashbots,debug
+      --http.vhosts=localhost,127.0.0.1,validation-node
+      --metrics
+      --metrics.addr=0.0.0.0
+      --metrics.port=6060
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: 3 }
+
+  validation-consensus:
+    image: registry.gitlab.com/pulsechaincom/lighthouse-pulse:latest
+    container_name: validation-consensus
+    restart: unless-stopped
+    stop_grace_period: 1m
+    depends_on:
+      validation-node:
+        condition: service_started
+    networks: [mev-net]
+    volumes:
+      - chaindata:/data
+    ports:
+      - "9007:9007/tcp"            # libp2p (production lighthouse uses 9000)
+      - "9007:9007/udp"            # discv5
+      - "9003:9003/udp"            # quic (production uses 9001)
+      - "127.0.0.1:5053:5052"      # beacon API - localhost only (production uses 5052)
+      - "127.0.0.1:5055:5054"      # metrics - localhost only (production uses 5054)
+    # NOTE: no --staking - no validator attaches to this stack.
+    # Re-enable ENR flags with a public IP once NAT is configured:
+    #   --enr-address=${PUBIP}
+    #   --enr-tcp-port=9007
+    #   --enr-udp-port=9007
+    #   --disable-enr-auto-update
+    command: >
+      lighthouse bn
+      --network=pulsechain
+      --datadir=/data/lighthouse
+      --execution-endpoint=http://validation-node:8552
+      --execution-jwt=/data/jwt.hex
+      --checkpoint-sync-url=https://checkpoint.pulsechain.com
+      --port=9007
+      --http
+      --http-address=0.0.0.0
+      --http-allow-origin=*
+      --metrics
+      --metrics-address=0.0.0.0
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: 3 }
