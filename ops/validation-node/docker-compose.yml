@@ -39,7 +39,7 @@ volumes:
 services:
 
   validation-node:
-    image: vouchrun/go-pulse-builder:pulse-2da88359c
+    image: vouchrun/go-pulse-builder:pulse-a131e9854
     container_name: validation-node
     restart: unless-stopped
     stop_grace_period: 2m          # clean db shutdown
