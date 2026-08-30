@@ -51,30 +51,30 @@ validation slice.
 
 ## Test results
 
-`go build ./...` **PASSED**. `go test ./eth/block-validation/`:
+`go build ./...` **PASSED**. `go test ./eth/block-validation/ -count=1` — **8/8 PASS**:
 
 | Test | Result |
 |---|---|
+| `TestValidateBuilderSubmissionV1` | PASS |
+| `TestValidateBuilderSubmissionV2` | PASS |
 | `TestValidateBuilderSubmissionV3` | PASS (unsupported on PulseChain) |
 | `TestBlacklistLoad` | PASS |
+| `TestValidateBuilderSubmissionV2_CoinbasePaymentUnderflow` | PASS |
 | `TestValidateBuilderSubmissionV2_CoinbasePaymentDefault` | PASS |
+| `TestValidateBuilderSubmissionV2_Blocklist` | PASS |
 | `TestValidateBuilderSubmissionV2_ExcludeWithdrawals` | PASS |
-| `TestValidateBuilderSubmissionV1` | FAIL - miner-built block tx count (see below) |
-| `TestValidateBuilderSubmissionV2` | FAIL - same |
-| `TestValidateBuilderSubmissionV2_CoinbasePaymentUnderflow` | FAIL - same |
-| `TestValidateBuilderSubmissionV2_Blocklist` | FAIL - same |
 
-**Known limitation (test infrastructure, not port logic):** the four failing cases build a
-block via the local **miner** and expect it to include a proposer-payment tx to the fee
-recipient. The old fork's miner (flashbots builder) added that payment tx; the **stock go-pulse
-miner does not**. The `buildBlock`-based cases (which construct the block with an explicit
-payment tx) pass, proving `ValidatePayload`/`ValidateBuilderSubmissionV2` work. The miner-based
-cases would need a custom miner that adds the payment tx, or rework onto `buildBlock` - a
-follow-up if relay smoke tests on the server exercise V2 with real Capella blocks.
+**Miner-difference note (why V1/V2 needed rework):** the stock go-pulse miner does **not** add a
+proposer-payment tx to the fee recipient (the old flashbots builder miner did). The ported
+V1/V2 tests therefore assemble the block explicitly via `buildBlock` with an EIP-1559 payment
+tx (tip 0, fee cap = base fee, signed by the builder key) as the last transaction, and use
+`useBalanceDiffProfit=false` so the wrong-value assertion reaches the last-tx payment check
+(the balance-diff path is covered by the `CoinbasePayment*`/`ExcludeWithdrawals` tests).
+Additionally the test node binds to loopback only (`127.0.0.1:0`, `NoDial`, `MaxPeers: 0`) so
+tests never request external network access.
 
 ## What remains (server-side)
 
 - Build the image, bring up the stack, and smoke-test `flashbots_validateBuilderSubmissionV2`
   with a real Capella-era PulseChain block payload on val002 (see
   `docs/validation-node-runbook.md`).
-- Decide whether to port a payment-tx-adding miner for the miner-based unit tests (optional).

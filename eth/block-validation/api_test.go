@@ -68,9 +68,12 @@ func TestValidateBuilderSubmissionV1(t *testing.T) {
 	genesis, preMergeBlocks := generateMergeChain(20, false)
 	os.Setenv("BUILDER_TX_SIGNING_KEY", "0x28c3cd61b687fdd03488e167a5d84f50269df2a4c29a2cfb1390903aa775c5d0")
 	n, ethservice := startEthService(t, genesis, preMergeBlocks)
-		defer n.Close()
+	defer n.Close()
 
-	api := NewBlockValidationAPI(ethservice, nil, true, true)
+	// useBalanceDiffProfit=false: the pool txs pay tips to the fee recipient,
+	// so a balance-diff check would mask the wrong-value assertion; the
+	// balance-diff path is covered by the CoinbasePayment* tests.
+	api := NewBlockValidationAPI(ethservice, nil, false, false)
 	parent := preMergeBlocks[len(preMergeBlocks)-1]
 
 	statedb, _ := ethservice.BlockChain().StateAt(parent.Root())
@@ -83,15 +86,36 @@ func TestValidateBuilderSubmissionV1(t *testing.T) {
 	ethservice.TxPool().Add([]*types.Transaction{cc}, true)
 
 	baseFee := eip1559.CalcBaseFee(params.AllEthashProtocolChanges, preMergeBlocks[len(preMergeBlocks)-1].Header())
-	tx2, _ := types.SignTx(types.NewTransaction(nonce+2, testAddr, big.NewInt(10), 21000, baseFee, nil), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
+	tx2, _ := types.SignTx(types.NewTransaction(nonce+2, testAddr, big.NewInt(10), 21000, big.NewInt(2*params.InitialBaseFee), nil), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
 	ethservice.TxPool().Add([]*types.Transaction{tx2}, true)
 
-	execData, err := assembleBlock(api, parent.Hash(), &engine.PayloadAttributes{
-		Timestamp:             parent.Time() + 5,
-		SuggestedFeeRecipient: testValidatorAddr,
-	})
-	require.EqualValues(t, len(execData.Transactions), 4)
+	// The stock go-pulse miner does not add a proposer-payment tx (the old
+	// flashbots builder miner did), so assemble the block explicitly with a
+	// payment tx to the fee recipient as the last transaction, then validate.
+	paymentValue := big.NewInt(100000000000)
+	paymentTx, _ := types.SignTx(types.NewTx(&types.DynamicFeeTx{
+		ChainID:   ethservice.BlockChain().Config().ChainID,
+		Nonce:     0,
+		GasTipCap: big.NewInt(0),
+		GasFeeCap: baseFee,
+		Gas:       21000,
+		To:        &testValidatorAddr,
+		Value:     paymentValue,
+	}), types.LatestSigner(ethservice.BlockChain().Config()), testBuilderKey)
+
+	execData, err := buildBlock(buildBlockArgs{
+		parentHash:    parent.Hash(),
+		parentRoot:    parent.Root(),
+		feeRecipient:  testValidatorAddr,
+		txs:           []*types.Transaction{tx1, cc, tx2, paymentTx},
+		random:        common.Hash{},
+		number:        parent.NumberU64() + 1,
+		gasLimit:      parent.GasLimit(),
+		timestamp:     parent.Time() + 5,
+		baseFeePerGas: baseFee,
+	}, ethservice.BlockChain())
 	require.NoError(t, err)
+	require.EqualValues(t, len(execData.Transactions), 4)
 
 	payload, err := ExecutableDataToExecutionPayload(execData)
 	require.NoError(t, err)
@@ -113,10 +137,11 @@ func TestValidateBuilderSubmissionV1(t *testing.T) {
 		},
 		RegisteredGasLimit: execData.GasLimit,
 	}
+	updatePayloadHash(t, blockRequest)
 
-	blockRequest.Message.Value = uint256.NewInt(190526394825529)
+	blockRequest.Message.Value = new(uint256.Int).SetUint64(paymentValue.Uint64() + 1)
 	require.ErrorContains(t, api.ValidateBuilderSubmissionV1(blockRequest), "inaccurate payment")
-	blockRequest.Message.Value = uint256.NewInt(149830884438530)
+	blockRequest.Message.Value = uint256.MustFromBig(paymentValue)
 	require.NoError(t, api.ValidateBuilderSubmissionV1(blockRequest))
 
 	blockRequest.Message.GasLimit += 1
@@ -175,9 +200,12 @@ func TestValidateBuilderSubmissionV2(t *testing.T) {
 	time := preMergeBlocks[len(preMergeBlocks)-1].Time() + 5
 	genesis.Config.ShanghaiTime = &time
 	n, ethservice := startEthService(t, genesis, preMergeBlocks)
-		defer n.Close()
+	defer n.Close()
 
-	api := NewBlockValidationAPI(ethservice, nil, true, true)
+	// useBalanceDiffProfit=false: the pool txs pay tips to the fee recipient,
+	// so a balance-diff check would mask the wrong-value assertion; the
+	// balance-diff path is covered by the CoinbasePayment* tests.
+	api := NewBlockValidationAPI(ethservice, nil, false, false)
 	parent := preMergeBlocks[len(preMergeBlocks)-1]
 
 	statedb, _ := ethservice.BlockChain().StateAt(parent.Root())
@@ -190,7 +218,7 @@ func TestValidateBuilderSubmissionV2(t *testing.T) {
 	ethservice.TxPool().Add([]*types.Transaction{cc}, true)
 
 	baseFee := eip1559.CalcBaseFee(params.AllEthashProtocolChanges, preMergeBlocks[len(preMergeBlocks)-1].Header())
-	tx2, _ := types.SignTx(types.NewTransaction(nonce+2, testAddr, big.NewInt(10), 21000, baseFee, nil), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
+	tx2, _ := types.SignTx(types.NewTransaction(nonce+2, testAddr, big.NewInt(10), 21000, big.NewInt(2*params.InitialBaseFee), nil), types.LatestSigner(ethservice.BlockChain().Config()), testKey)
 	ethservice.TxPool().Add([]*types.Transaction{tx2}, true)
 
 	withdrawals := []*types.Withdrawal{
@@ -208,11 +236,32 @@ func TestValidateBuilderSubmissionV2(t *testing.T) {
 		},
 	}
 
-	execData, err := assembleBlock(api, parent.Hash(), &engine.PayloadAttributes{
-		Timestamp:             parent.Time() + 5,
-		Withdrawals:           withdrawals,
-		SuggestedFeeRecipient: testValidatorAddr,
-	})
+	// The stock go-pulse miner does not add a proposer-payment tx (the old
+	// flashbots builder miner did), so assemble the block explicitly with a
+	// payment tx to the fee recipient as the last transaction, then validate.
+	paymentValue := big.NewInt(100000000000)
+	paymentTx, _ := types.SignTx(types.NewTx(&types.DynamicFeeTx{
+		ChainID:   ethservice.BlockChain().Config().ChainID,
+		Nonce:     0,
+		GasTipCap: big.NewInt(0),
+		GasFeeCap: baseFee,
+		Gas:       21000,
+		To:        &testValidatorAddr,
+		Value:     paymentValue,
+	}), types.LatestSigner(ethservice.BlockChain().Config()), testBuilderKey)
+
+	execData, err := buildBlock(buildBlockArgs{
+		parentHash:    parent.Hash(),
+		parentRoot:    parent.Root(),
+		feeRecipient:  testValidatorAddr,
+		txs:           []*types.Transaction{tx1, cc, tx2, paymentTx},
+		random:        common.Hash{},
+		number:        parent.NumberU64() + 1,
+		gasLimit:      parent.GasLimit(),
+		timestamp:     parent.Time() + 5,
+		baseFeePerGas: baseFee,
+		withdrawals:   withdrawals,
+	}, ethservice.BlockChain())
 	require.NoError(t, err)
 	require.EqualValues(t, len(execData.Withdrawals), 2)
 	require.EqualValues(t, len(execData.Transactions), 4)
@@ -232,16 +281,17 @@ func TestValidateBuilderSubmissionV2(t *testing.T) {
 				ProposerFeeRecipient: proposerAddr,
 				GasLimit:             execData.GasLimit,
 				GasUsed:              execData.GasUsed,
-				// This value is actual profit + 1, validation should fail
-				Value: uint256.NewInt(149842511727213),
 			},
 			ExecutionPayload: payload,
 		},
 		RegisteredGasLimit: execData.GasLimit,
 	}
+	updatePayloadHashV2(t, blockRequest)
 
+	// This value is actual profit + 1, validation should fail
+	blockRequest.Message.Value = new(uint256.Int).SetUint64(paymentValue.Uint64() + 1)
 	require.ErrorContains(t, api.ValidateBuilderSubmissionV2(blockRequest), "inaccurate payment")
-	blockRequest.Message.Value = uint256.NewInt(149842511727212)
+	blockRequest.Message.Value = uint256.MustFromBig(paymentValue)
 	require.NoError(t, api.ValidateBuilderSubmissionV2(blockRequest))
 
 	blockRequest.Message.GasLimit += 1
@@ -329,7 +379,9 @@ func generateMergeChain(n int, merged bool) (*core.Genesis, []*types.Block) {
 	genesis := &core.Genesis{
 		Config: &config,
 		Alloc: types.GenesisAlloc{
-			testAddr:                  {Balance: testBalance},
+			testAddr:                       {Balance: testBalance},
+			testValidatorAddr:              {Balance: testBalance},
+			testBuilderAddr:                {Balance: testBalance},
 			params.BeaconRootsAddress: {Balance: common.Big0, Code: common.Hex2Bytes("3373fffffffffffffffffffffffffffffffffffffffe14604457602036146024575f5ffd5b620180005f350680545f35146037575f5ffd5b6201800001545f5260205ff35b6201800042064281555f359062018000015500")},
 			config.DepositContractAddress: {
 				// Simple deposit generator, source: https://gist.github.com/lightclient/54abb2af2465d6969fa6d1920b9ad9d7
@@ -368,9 +420,10 @@ func startEthService(t *testing.T, genesis *core.Genesis, blocks []*types.Block)
 
 	n, err := node.New(&node.Config{
 		P2P: p2p.Config{
-			ListenAddr:  "0.0.0.0:0",
+			ListenAddr:  "127.0.0.1:0",
 			NoDiscovery: true,
-			MaxPeers:    25,
+			NoDial:      true,
+			MaxPeers:    0,
 		},
 	})
 	if err != nil {
@@ -393,28 +446,6 @@ func startEthService(t *testing.T, genesis *core.Genesis, blocks []*types.Block)
 	time.Sleep(500 * time.Millisecond) // give txpool enough time to consume head event
 	ethservice.SetSynced()
 	return n, ethservice
-}
-
-func assembleBlock(api *BlockValidationAPI, parentHash common.Hash, params *engine.PayloadAttributes) (*engine.ExecutableData, error) {
-	args := &miner.BuildPayloadArgs{
-		Parent:       parentHash,
-		Timestamp:    params.Timestamp,
-		FeeRecipient: params.SuggestedFeeRecipient,
-		Random:       params.Random,
-		Withdrawals:  params.Withdrawals,
-		BeaconRoot:   params.BeaconRoot,
-	}
-
-	payload, err := api.eth.Miner().BuildPayload(args, false)
-	if err != nil {
-		return nil, err
-	}
-
-	if payload := payload.ResolveFull(); payload != nil {
-		return payload.ExecutionPayload, nil
-	}
-
-	return nil, errors.New("payload did not resolve")
 }
 
 func TestBlacklistLoad(t *testing.T) {
@@ -1029,6 +1060,9 @@ func TestValidateBuilderSubmissionV2_ExcludeWithdrawals(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorContains(t, api.ValidateBuilderSubmissionV2(req), "payment")
 }
+
+
+
 
 
 
