@@ -50,8 +50,11 @@ services:
       - "30307:30307/tcp"          # p2p (production geth uses 30303)
       - "30307:30307/udp"          # discovery
       - "127.0.0.1:18546:18546"    # JSON-RPC - localhost only; relay -blocksim target
-      - "127.0.0.1:6061:6060"      # metrics - scrape as host:6061 from Prometheus
+      - "127.0.0.1:6061:6060"      # metrics - scrape as host:6061 (prometheus-snippet.yml)
       # authrpc 8552 intentionally NOT published (internal only)
+      # NOTE: the relay's gate exporter (mev-boost-relay ops/monitoring) reaches
+      # this EL on mev-net at validation-node:18546 and the CL at
+      # validation-consensus:5052 - do not lock these down to loopback.
     # Optional inbound P2P (uncomment and add to command when wanted):
     #   --nat=extip:<VOTER_SERVER_PUBLIC_IP>
     command: >
@@ -93,7 +96,9 @@ services:
       - "9007:9007/udp"            # discv5
       - "9003:9003/udp"            # quic (production uses 9001)
       - "127.0.0.1:5053:5052"      # beacon API - localhost only (production uses 5052)
-      - "127.0.0.1:5055:5054"      # metrics - localhost only (production uses 5054)
+      - "127.0.0.1:5055:5054"      # metrics - localhost only (production uses 5054); host:5055
+      # NOTE: container port 5052 stays reachable on mev-net (not published to the
+      # host) - the relay's gate exporter uses it as its BEACON_API default.
     # NOTE: no --staking - no validator attaches to this stack.
     # Re-enable ENR flags with a public IP once NAT is configured:
     #   --enr-address=${PUBIP}
