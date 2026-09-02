@@ -2202,14 +2202,26 @@ func SetBuilderConfig(ctx *cli.Context, cfg *builder.Config) {
 	set(BuilderGenesisForkVersion.Name, func() error { cfg.GenesisForkVersion = ctx.String(BuilderGenesisForkVersion.Name); return nil })
 	set(BuilderBellatrixForkVersion.Name, func() error { cfg.BellatrixForkVersion = ctx.String(BuilderBellatrixForkVersion.Name); return nil })
 	set(BuilderGenesisValidatorsRoot.Name, func() error { cfg.GenesisValidatorsRoot = ctx.String(BuilderGenesisValidatorsRoot.Name); return nil })
-	set(BuilderBeaconEndpoints.Name, func() error { cfg.BeaconEndpoints = strings.Split(ctx.String(BuilderBeaconEndpoints.Name), ","); return nil })
+	set(BuilderBeaconEndpoints.Name, func() error {
+		cfg.BeaconEndpoints = strings.Split(ctx.String(BuilderBeaconEndpoints.Name), ",")
+		return nil
+	})
 	set(BuilderRemoteRelayEndpoint.Name, func() error { cfg.RemoteRelayEndpoint = ctx.String(BuilderRemoteRelayEndpoint.Name); return nil })
-	set(BuilderSecondaryRemoteRelayEndpoints.Name, func() error { cfg.SecondaryRemoteRelayEndpoints = strings.Split(ctx.String(BuilderSecondaryRemoteRelayEndpoints.Name), ","); return nil })
+	set(BuilderSecondaryRemoteRelayEndpoints.Name, func() error {
+		cfg.SecondaryRemoteRelayEndpoints = strings.Split(ctx.String(BuilderSecondaryRemoteRelayEndpoints.Name), ",")
+		return nil
+	})
 	set(BuilderRateLimitDuration.Name, func() error { cfg.BuilderRateLimitDuration = ctx.String(BuilderRateLimitDuration.Name); return nil })
 	set(BuilderRateLimitMaxBurst.Name, func() error { cfg.BuilderRateLimitMaxBurst = ctx.Int(BuilderRateLimitMaxBurst.Name); return nil })
-	set(BuilderBlockResubmitInterval.Name, func() error { cfg.BuilderRateLimitResubmitInterval = ctx.String(BuilderBlockResubmitInterval.Name); return nil })
+	set(BuilderBlockResubmitInterval.Name, func() error {
+		cfg.BuilderRateLimitResubmitInterval = ctx.String(BuilderBlockResubmitInterval.Name)
+		return nil
+	})
 	set(BuilderSubmissionOffset.Name, func() error { cfg.BuilderSubmissionOffset = ctx.Duration(BuilderSubmissionOffset.Name); return nil })
-	set(BuilderDiscardRevertibleTxOnErr.Name, func() error { cfg.DiscardRevertibleTxOnErr = ctx.Bool(BuilderDiscardRevertibleTxOnErr.Name); return nil })
+	set(BuilderDiscardRevertibleTxOnErr.Name, func() error {
+		cfg.DiscardRevertibleTxOnErr = ctx.Bool(BuilderDiscardRevertibleTxOnErr.Name)
+		return nil
+	})
 	set(BuilderBlockProcessorURL.Name, func() error { cfg.BlockProcessorURL = ctx.String(BuilderBlockProcessorURL.Name); return nil })
 	if ctx.IsSet(BuilderBlacklist.Name) {
 		cfg.ValidationBlocklist = ctx.String(BuilderBlacklist.Name)
