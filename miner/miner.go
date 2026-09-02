@@ -18,8 +18,11 @@
 package miner
 
 import (
+	"crypto/ecdsa"
 	"fmt"
 	"math/big"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +33,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -48,6 +53,10 @@ type Config struct {
 	GasCeil             uint64         // Target gas ceiling for mined blocks.
 	GasPrice            *big.Int       // Minimum gas price for mining a transaction
 	Recommit            time.Duration  // The time interval for miner to re-create mining work.
+	// BuilderTxSigningKey is the key used to sign the proposer-payment tx
+	// appended to blocks built in builder mode (flashbots model). When nil,
+	// no payment tx is added and the block coinbase is the fee recipient.
+	BuilderTxSigningKey *ecdsa.PrivateKey `toml:",omitempty"`
 }
 
 // DefaultConfig contains default settings for miner.
@@ -61,6 +70,11 @@ var DefaultConfig = Config{
 	// run 3 rounds.
 	Recommit: 2 * time.Second,
 }
+
+// BlockHookFn is invoked after a block is sealed while building a payload in
+// builder mode (the flashbots block-hook contract). Bundle slices are unused
+// in naive mode (no searcher ingestion) and stay nil.
+type BlockHookFn = func(*types.Block, *big.Int, []*types.BlobTxSidecar, time.Time, []types.SimulatedBundle, []types.SimulatedBundle, []types.UsedSBundle)
 
 // Miner is the main object which takes care of submitting new work to consensus
 // engine and gathering the sealing result.
@@ -78,6 +92,15 @@ type Miner struct {
 
 // New creates a new miner with provided config.
 func New(eth Backend, config Config, engine consensus.Engine) *Miner {
+	if config.BuilderTxSigningKey == nil {
+		if key := os.Getenv("BUILDER_TX_SIGNING_KEY"); key != "" {
+			if parsed, err := crypto.HexToECDSA(strings.TrimPrefix(key, "0x")); err != nil {
+				log.Error("Error parsing builder tx signing key from env", "err", err)
+			} else {
+				config.BuilderTxSigningKey = parsed
+			}
+		}
+	}
 	return &Miner{
 		config:      &config,
 		chainConfig: eth.BlockChain().Config(),
@@ -86,6 +109,16 @@ func New(eth Backend, config Config, engine consensus.Engine) *Miner {
 		chain:       eth.BlockChain(),
 		pending:     &pending{},
 	}
+}
+
+// builderCoinbase returns the address the builder signs proposer-payment
+// transactions with. With a signing key configured it is the key's address;
+// otherwise it falls back to the configured etherbase.
+func (miner *Miner) builderCoinbase() common.Address {
+	if miner.config.BuilderTxSigningKey != nil {
+		return crypto.PubkeyToAddress(miner.config.BuilderTxSigningKey.PublicKey)
+	}
+	return miner.config.Etherbase
 }
 
 // Pending returns the currently pending block and associated receipts, logs

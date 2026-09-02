@@ -44,6 +44,10 @@ type BuildPayloadArgs struct {
 	Withdrawals  types.Withdrawals     // The provided withdrawals
 	BeaconRoot   *common.Hash          // The provided beaconRoot (Cancun)
 	Version      engine.PayloadVersion // Versioning byte for payload id calculation.
+	// BlockHook, when set, is invoked with each newly sealed full block during
+	// payload building (flashbots builder mode). The block value passed is the
+	// bid value (total fees, or the proposer-payment amount in builder mode).
+	BlockHook BlockHookFn
 }
 
 // Id computes an 8-byte identifier by hashing the components of the payload arguments.
@@ -78,18 +82,20 @@ type Payload struct {
 	emptyRequests [][]byte
 	requests      [][]byte
 	fullFees      *big.Int
+	onBlock       BlockHookFn
 	stop          chan struct{}
 	lock          sync.Mutex
 	cond          *sync.Cond
 }
 
 // newPayload initializes the payload object.
-func newPayload(empty *types.Block, emptyRequests [][]byte, witness *stateless.Witness, id engine.PayloadID) *Payload {
+func newPayload(empty *types.Block, emptyRequests [][]byte, witness *stateless.Witness, id engine.PayloadID, onBlock BlockHookFn) *Payload {
 	payload := &Payload{
 		id:            id,
 		empty:         empty,
 		emptyRequests: emptyRequests,
 		emptyWitness:  witness,
+		onBlock:       onBlock,
 		stop:          make(chan struct{}),
 	}
 	log.Info("Starting work on payload", "id", payload.id)
@@ -116,6 +122,10 @@ func (payload *Payload) update(r *newPayloadResult, elapsed time.Duration) {
 		payload.sidecars = r.sidecars
 		payload.requests = r.requests
 		payload.fullWitness = r.witness
+
+		if payload.onBlock != nil {
+			payload.onBlock(r.block, r.fees, r.sidecars, time.Now(), nil, nil, nil)
+		}
 
 		feesInEther := new(big.Float).Quo(new(big.Float).SetInt(r.fees), big.NewFloat(params.Ether))
 		log.Info("Updated payload",
@@ -225,7 +235,7 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 		return nil, empty.err
 	}
 	// Construct a payload object for return.
-	payload := newPayload(empty.block, empty.requests, empty.witness, args.Id())
+	payload := newPayload(empty.block, empty.requests, empty.witness, args.Id(), args.BlockHook)
 
 	// Spin up a routine for updating the payload in background. This strategy
 	// can maximum the revenue for including transactions with highest fee.

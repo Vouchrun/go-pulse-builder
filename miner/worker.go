@@ -106,7 +106,17 @@ type generateParams struct {
 
 // generateWork generates a sealing block based on the given parameters.
 func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPayloadResult {
-	work, err := miner.prepareWork(genParam, witness)
+	// In builder mode (BuilderTxSigningKey set) the block coinbase is the
+	// builder's address and the validator (the payload-attributes fee
+	// recipient) is paid with a proposer-payment tx - the flashbots model.
+	// The relay's block validation requires that payment tx to be the last
+	// transaction with value equal to the submitted bid value.
+	validatorCoinbase := genParam.coinbase
+	gp := *genParam
+	if miner.config.BuilderTxSigningKey != nil {
+		gp.coinbase = miner.builderCoinbase()
+	}
+	work, err := miner.prepareWork(&gp, witness)
 	if err != nil {
 		return &newPayloadResult{err: err}
 	}
@@ -115,25 +125,42 @@ func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPay
 	// Due to the cap on withdrawal count, this can actually never happen, but we still need to
 	// check to ensure the CL notices there's a problem if the withdrawal cap is ever lifted.
 	maxBlockSize := params.MaxBlockSize - maxBlockSizeBufferZone
-	if genParam.withdrawals.Size() > maxBlockSize {
+	if gp.withdrawals.Size() > maxBlockSize {
 		return &newPayloadResult{err: errors.New("withdrawals exceed max block size")}
 	}
 	// Also add size of withdrawals to work block size.
-	work.size += uint64(genParam.withdrawals.Size())
+	work.size += uint64(gp.withdrawals.Size())
 
-	if !genParam.noTxs {
+	if !gp.noTxs {
 		interrupt := new(atomic.Int32)
 		timer := time.AfterFunc(miner.config.Recommit, func() {
 			interrupt.Store(commitInterruptTimeout)
 		})
 		defer timer.Stop()
 
+		// Reserve gas + record the builder balance for the proposer-payment
+		// tx (the payment value = tips the builder earned in this block).
+		var paymentReserve *proposerTxReservation
+		if miner.config.BuilderTxSigningKey != nil {
+			paymentReserve, err = miner.proposerTxPrepare(work, validatorCoinbase)
+			if err != nil {
+				return &newPayloadResult{err: err}
+			}
+		}
+
 		err := miner.fillTransactions(interrupt, work)
 		if errors.Is(err, errBlockInterruptedByTimeout) {
 			log.Warn("Block building is interrupted", "allowance", common.PrettyDuration(miner.config.Recommit))
 		}
+		// Append the proposer-payment tx (only when the block actually has
+		// content - an empty mempool yields an empty block with no payment).
+		if paymentReserve != nil && len(work.txs) > 0 {
+			if err := miner.proposerTxCommit(work, validatorCoinbase, paymentReserve); err != nil {
+				return &newPayloadResult{err: err}
+			}
+		}
 	}
-	body := types.Body{Transactions: work.txs, Withdrawals: genParam.withdrawals}
+	body := types.Body{Transactions: work.txs, Withdrawals: gp.withdrawals}
 
 	allLogs := make([]*types.Log, 0)
 	for _, r := range work.receipts {
@@ -166,15 +193,95 @@ func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPay
 	if err != nil {
 		return &newPayloadResult{err: err}
 	}
+	fees := totalFees(block, work.receipts)
+	if miner.config.BuilderTxSigningKey != nil && len(block.Transactions()) > 0 {
+		// Bid value = proposer-payment amount (the last tx), matching the
+		// relay's last-tx-payment validation.
+		if last := block.Transactions()[len(block.Transactions())-1]; last.To() != nil && *last.To() == validatorCoinbase {
+			fees = new(big.Int).Set(last.Value())
+		}
+	}
 	return &newPayloadResult{
 		block:    block,
-		fees:     totalFees(block, work.receipts),
+		fees:     fees,
 		sidecars: work.sidecars,
 		stateDB:  work.state,
 		receipts: work.receipts,
 		requests: requests,
 		witness:  work.witness,
 	}
+}
+
+// proposerTxReservation captures the builder state before the mempool fill so
+// the proposer-payment tx can pay out exactly the tips earned in this block.
+type proposerTxReservation struct {
+	builderBalance *big.Int
+	reservedGas    uint64
+}
+
+// proposerTxPrepare reserves gas for the proposer-payment tx and records the
+// builder's balance before the mempool fill. EOA recipients only - contract
+// recipients need env-diff gas estimation (comes with the bundle machinery in
+// milestone 2).
+func (miner *Miner) proposerTxPrepare(env *environment, validatorCoinbase common.Address) (*proposerTxReservation, error) {
+	if validatorCoinbase == (common.Address{}) {
+		return nil, nil
+	}
+	codeHash := env.state.GetCodeHash(validatorCoinbase)
+	if codeHash != (common.Hash{}) && codeHash != types.EmptyCodeHash {
+		return nil, errors.New("contract fee recipient not supported in naive builder mode")
+	}
+	gas := uint64(params.TxGas)
+	if err := env.gasPool.SubGas(gas); err != nil {
+		return nil, err
+	}
+	return &proposerTxReservation{
+		builderBalance: env.state.GetBalance(env.coinbase).ToBig(),
+		reservedGas:    gas,
+	}, nil
+}
+
+// proposerTxCommit signs and appends the proposer-payment tx: an EIP-1559
+// transfer from the builder to the validator's fee recipient with gas tip 0,
+// fee cap = base fee, and value = the tips the builder earned during the fill.
+func (miner *Miner) proposerTxCommit(env *environment, validatorCoinbase common.Address, reserve *proposerTxReservation) error {
+	if reserve == nil {
+		return nil
+	}
+	availableFunds := new(big.Int).Sub(env.state.GetBalance(env.coinbase).ToBig(), reserve.builderBalance)
+	if availableFunds.Sign() <= 0 {
+		return errors.New("builder balance decreased")
+	}
+	env.gasPool.AddGas(reserve.reservedGas)
+
+	baseFee := env.header.BaseFee
+	if baseFee == nil {
+		return errors.New("no base fee")
+	}
+	amount := new(big.Int).Sub(availableFunds, new(big.Int).Mul(baseFee, new(big.Int).SetUint64(reserve.reservedGas)))
+	if amount.Sign() < 0 {
+		return errors.New("not enough funds for proposer payment")
+	}
+	tx, err := types.SignNewTx(miner.config.BuilderTxSigningKey, env.signer, &types.DynamicFeeTx{
+		ChainID:   miner.chainConfig.ChainID,
+		Nonce:     env.state.GetNonce(env.coinbase),
+		GasTipCap: new(big.Int),
+		GasFeeCap: new(big.Int).Set(baseFee),
+		Gas:       reserve.reservedGas,
+		To:        &validatorCoinbase,
+		Value:     amount,
+	})
+	if err != nil {
+		return err
+	}
+	if err := miner.commitTransaction(env, tx); err != nil {
+		return err
+	}
+	receipt := env.receipts[len(env.receipts)-1]
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return errors.New("proposer payment tx failed")
+	}
+	return nil
 }
 
 // prepareWork constructs the sealing task according to the given parameters,
