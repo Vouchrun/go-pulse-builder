@@ -39,11 +39,13 @@ volumes:
 services:
 
   validation-node:
-    image: vouchrun/go-pulse-builder:pulse-a131e9854
+    image: vouchrun/go-pulse-builder:pulse-3592f5cf7
     container_name: validation-node
     restart: unless-stopped
     stop_grace_period: 2m          # clean db shutdown
     networks: [mev-net]
+    environment:
+      BUILDER_TX_SIGNING_KEY: ${BUILDER_TX_SIGNING_KEY}
     volumes:
       - chaindata:/data
     ports:
@@ -76,6 +78,15 @@ services:
       --metrics
       --metrics.addr=0.0.0.0
       --metrics.port=6060
+      --builder
+      --builder.secret_key=${BUILDER_BLS_KEY}
+      --builder.remote_relay_endpoint=http://relay-api:9062
+      --builder.beacon_endpoints=http://validation-consensus:5052
+      --builder.genesis_fork_version=0x00000369
+      --builder.bellatrix_fork_version=0x0000036b
+      --builder.genesis_validators_root=0x3357ba0018a2582aeabe4ae847aa17d50a3a99aaeb66293c01f80a83aecd0c90
+      --builder.seconds_in_slot=10
+      --builder.slots_in_epoch=32
     logging:
       driver: json-file
       options: { max-size: 10m, max-file: 3 }

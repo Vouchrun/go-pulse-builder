@@ -109,7 +109,56 @@ See `repos/mev-boost-relay/docs/relay-deploy-runbook.md` (§2.1 networking, §5 
 
 ---
 
-## 6. Failure drill
+## 6. Builder mode (naive) - Phase 4
+
+The same EL image also runs in **builder mode**: it watches the CL's payload-attributes SSE,
+builds a block from its own mempool, appends a **proposer-payment tx** (flashbots model: block
+coinbase = builder, last tx = tip-0 EIP-1559 transfer to the validator's fee recipient),
+signs the bid, and submits it to our relay over `mev-net`. Naive = no searcher-bundle
+ingestion yet (see `PORT.md` Phase 4).
+
+The compose's `validation-node` command already carries the deployed builder flags (after
+`--metrics.port=6060`):
+
+```
+--builder
+--builder.secret_key=${BUILDER_BLS_KEY}
+--builder.remote_relay_endpoint=http://relay-api:9062
+--builder.beacon_endpoints=http://validation-consensus:5052
+--builder.genesis_fork_version=0x00000369
+--builder.bellatrix_fork_version=0x0000036b
+--builder.genesis_validators_root=0x3357ba0018a2582aeabe4ae847aa17d50a3a99aaeb66293c01f80a83aecd0c90
+--builder.seconds_in_slot=10
+--builder.slots_in_epoch=32
+```
+
+**Two keys** (secrets stay in the server's `.env`, chmod 600 - the repo `.gitignore` excludes
+`.env`):
+- `BUILDER_BLS_KEY` - the **BLS** bid-signing key (fed to `--builder.secret_key`; any 32-byte
+  hex secret, like the relay's own `-secret-key` pattern).
+- `BUILDER_TX_SIGNING_KEY` - the **ECDSA** key that signs the proposer-payment tx (read by the
+  miner from the environment). The corresponding address must be **funded with PLS** - it pays
+  the validator the block's tip income and the payment tx's own base fee.
+
+**Relay side:** nothing to register. The relay accepts unknown builders at **low priority**
+(`checkBuilderEntry` verified - unknown builders are allowed but ranked below known ones), so
+the first submission is enough to start appearing in `getHeader` responses.
+
+**Enabling/disabling:** a container recreate only - `docker compose up -d` (the image is
+already tagged for it). Same datadir, no re-sync; the `flashbots` validation namespace keeps
+serving in parallel (the relay's `-blocksim` path is unaffected).
+
+**Verification:**
+```
+docker logs -f validation-node | grep -iE "builder|submitted block"
+curl -s -X POST -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"rpc_modules","params":[]}' http://127.0.0.1:18546   # expect "builder":"1.0"
+```
+A submitted block also appears in the relay's delivered traces (mev-boost-relay gate exporter
+`mev_relay_delivered_recent`).
+
+---
+
+## 7. Failure drill
 
 1. `docker compose stop validation-node` (kill the validation EL).
 2. The relay's validations fail (the relay sees the validation node as unavailable) - builder
@@ -120,7 +169,7 @@ See `repos/mev-boost-relay/docs/relay-deploy-runbook.md` (§2.1 networking, §5 
 
 ---
 
-## 7. Rollback
+## 8. Rollback
 
 - Stop + remove the stack: `docker compose down`.
 - Delete the validation datadir (the only data of value is the synced chain; re-sync is a
