@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,7 +17,6 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/r3labs/sse"
 )
 
 type IBeaconClient interface {
@@ -276,46 +276,82 @@ type PayloadAttributes struct {
 
 // SubscribeToPayloadAttributesEvents subscribes to payload attributes events to validate fields such as prevrandao and withdrawals
 func (b *BeaconClient) SubscribeToPayloadAttributesEvents(payloadAttrC chan types.BuilderPayloadAttributes) {
-	payloadAttributesResp := new(PayloadAttributesEvent)
-
 	eventsURL := fmt.Sprintf("%s/eth/v1/events?topics=payload_attributes", b.endpoint)
 	log.Info("subscribing to payload_attributes events")
 
 	for {
-		client := sse.NewClient(eventsURL)
-		err := client.SubscribeRawWithContext(b.ctx, func(msg *sse.Event) {
-			err := json.Unmarshal(msg.Data, payloadAttributesResp)
-			if err != nil {
-				log.Error("could not unmarshal payload_attributes event", "err", err)
-			} else {
-				// convert capella.Withdrawal to types.Withdrawal
-				var withdrawals []*types.Withdrawal
-				for _, w := range payloadAttributesResp.Data.PayloadAttributes.Withdrawals {
-					withdrawals = append(withdrawals, &types.Withdrawal{
-						Index:     uint64(w.Index),
-						Validator: uint64(w.ValidatorIndex),
-						Address:   common.Address(w.Address),
-						Amount:    uint64(w.Amount),
-					})
-				}
-
-				data := types.BuilderPayloadAttributes{
-					Slot:                  payloadAttributesResp.Data.ProposalSlot,
-					HeadHash:              payloadAttributesResp.Data.ParentBlockHash,
-					Timestamp:             hexutil.Uint64(payloadAttributesResp.Data.PayloadAttributes.Timestamp),
-					Random:                payloadAttributesResp.Data.PayloadAttributes.PrevRandao,
-					SuggestedFeeRecipient: payloadAttributesResp.Data.PayloadAttributes.SuggestedFeeRecipient,
-					Withdrawals:           withdrawals,
-					ParentBeaconBlockRoot: payloadAttributesResp.Data.PayloadAttributes.ParentBeaconBlockRoot,
-				}
-				payloadAttrC <- data
-			}
-		})
-		if err != nil {
-			log.Error("failed to subscribe to payload_attributes events", "err", err)
-			time.Sleep(1 * time.Second)
+		if b.ctx.Err() != nil {
+			return
 		}
-		log.Warn("beaconclient SubscribeRaw ended, reconnecting")
+		err := b.subscribePayloadAttributes(eventsURL, payloadAttrC)
+		if err != nil {
+			log.Error("payload_attributes SSE stream ended", "err", err)
+		}
+		select {
+		case <-b.ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// subscribePayloadAttributes maintains one SSE connection and forwards parsed
+// payload_attributes events to the channel. It returns when the stream ends
+// or the context is canceled (the caller reconnects).
+func (b *BeaconClient) subscribePayloadAttributes(eventsURL string, payloadAttrC chan types.BuilderPayloadAttributes) error {
+	req, err := http.NewRequestWithContext(b.ctx, http.MethodGet, eventsURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("subscribe to payload_attributes events failed: %s", resp.Status)
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	for {
+		ev, err := readSSEEvent(reader)
+		if err != nil {
+			return err
+		}
+		// Keep-alive comments and events without data are not payload
+		// attributes (lighthouse's warp keep-alive sends ": ping" every 15s).
+		if ev.event != "payload_attributes" || ev.data == "" {
+			continue
+		}
+		payloadAttributesResp := new(PayloadAttributesEvent)
+		if err := json.Unmarshal([]byte(ev.data), payloadAttributesResp); err != nil {
+			log.Error("could not unmarshal payload_attributes event", "err", err)
+			continue
+		}
+		// convert capella.Withdrawal to types.Withdrawal
+		var withdrawals []*types.Withdrawal
+		for _, w := range payloadAttributesResp.Data.PayloadAttributes.Withdrawals {
+			withdrawals = append(withdrawals, &types.Withdrawal{
+				Index:     uint64(w.Index),
+				Validator: uint64(w.ValidatorIndex),
+				Address:   common.Address(w.Address),
+				Amount:    uint64(w.Amount),
+			})
+		}
+
+		data := types.BuilderPayloadAttributes{
+			Slot:                  payloadAttributesResp.Data.ProposalSlot,
+			HeadHash:              payloadAttributesResp.Data.ParentBlockHash,
+			Timestamp:             hexutil.Uint64(payloadAttributesResp.Data.PayloadAttributes.Timestamp),
+			Random:                payloadAttributesResp.Data.PayloadAttributes.PrevRandao,
+			SuggestedFeeRecipient: payloadAttributesResp.Data.PayloadAttributes.SuggestedFeeRecipient,
+			Withdrawals:           withdrawals,
+			ParentBeaconBlockRoot: payloadAttributesResp.Data.PayloadAttributes.ParentBeaconBlockRoot,
+		}
+		payloadAttrC <- data
 	}
 }
 
