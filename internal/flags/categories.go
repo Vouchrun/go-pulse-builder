@@ -30,6 +30,7 @@ const (
 	APICategory        = "API AND CONSOLE"
 	NetworkingCategory = "NETWORKING"
 	MinerCategory      = "MINER"
+	BuilderCategory    = "BUILDER"
 	GasPriceCategory   = "GAS PRICE ORACLE"
 	VMCategory         = "VIRTUAL MACHINE"
 	LoggingCategory    = "LOGGING AND DEBUGGING"
