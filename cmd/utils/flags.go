@@ -2182,20 +2182,35 @@ func SetBuilderConfig(ctx *cli.Context, cfg *builder.Config) {
 	}
 	cfg.EnableValidatorChecks = ctx.IsSet(BuilderEnableValidatorChecks.Name)
 	cfg.EnableLocalRelay = ctx.IsSet(BuilderEnableLocalRelay.Name)
-	cfg.SlotsInEpoch = ctx.Uint64(BuilderSlotsInEpoch.Name)
-	cfg.SecondsInSlot = ctx.Uint64(BuilderSecondsInSlot.Name)
 	cfg.DisableBundleFetcher = ctx.IsSet(BuilderDisableBundleFetcher.Name)
 	cfg.DryRun = ctx.IsSet(BuilderDryRun.Name)
 	cfg.IgnoreLatePayloadAttributes = ctx.IsSet(BuilderIgnoreLatePayloadAttributes.Name)
-	cfg.BuilderSecretKey = ctx.String(BuilderSecretKey.Name)
-	cfg.RelaySecretKey = ctx.String(BuilderRelaySecretKey.Name)
-	cfg.ListenAddr = ctx.String(BuilderListenAddr.Name)
-	cfg.GenesisForkVersion = ctx.String(BuilderGenesisForkVersion.Name)
-	cfg.BellatrixForkVersion = ctx.String(BuilderBellatrixForkVersion.Name)
-	cfg.GenesisValidatorsRoot = ctx.String(BuilderGenesisValidatorsRoot.Name)
-	cfg.BeaconEndpoints = strings.Split(ctx.String(BuilderBeaconEndpoints.Name), ",")
-	cfg.RemoteRelayEndpoint = ctx.String(BuilderRemoteRelayEndpoint.Name)
-	cfg.SecondaryRemoteRelayEndpoints = strings.Split(ctx.String(BuilderSecondaryRemoteRelayEndpoints.Name), ",")
+	cfg.EnableCancellations = ctx.IsSet(BuilderEnableCancellations.Name)
+	// Scalar flags only override the (possibly config-file-derived) config when
+	// actually set on the command line or via their env var, so a TOML `Builder`
+	// block keeps working.
+	set := func(name string, fn func() error) {
+		if ctx.IsSet(name) {
+			fn()
+		}
+	}
+	set(BuilderSlotsInEpoch.Name, func() error { cfg.SlotsInEpoch = ctx.Uint64(BuilderSlotsInEpoch.Name); return nil })
+	set(BuilderSecondsInSlot.Name, func() error { cfg.SecondsInSlot = ctx.Uint64(BuilderSecondsInSlot.Name); return nil })
+	set(BuilderSecretKey.Name, func() error { cfg.BuilderSecretKey = ctx.String(BuilderSecretKey.Name); return nil })
+	set(BuilderRelaySecretKey.Name, func() error { cfg.RelaySecretKey = ctx.String(BuilderRelaySecretKey.Name); return nil })
+	set(BuilderListenAddr.Name, func() error { cfg.ListenAddr = ctx.String(BuilderListenAddr.Name); return nil })
+	set(BuilderGenesisForkVersion.Name, func() error { cfg.GenesisForkVersion = ctx.String(BuilderGenesisForkVersion.Name); return nil })
+	set(BuilderBellatrixForkVersion.Name, func() error { cfg.BellatrixForkVersion = ctx.String(BuilderBellatrixForkVersion.Name); return nil })
+	set(BuilderGenesisValidatorsRoot.Name, func() error { cfg.GenesisValidatorsRoot = ctx.String(BuilderGenesisValidatorsRoot.Name); return nil })
+	set(BuilderBeaconEndpoints.Name, func() error { cfg.BeaconEndpoints = strings.Split(ctx.String(BuilderBeaconEndpoints.Name), ","); return nil })
+	set(BuilderRemoteRelayEndpoint.Name, func() error { cfg.RemoteRelayEndpoint = ctx.String(BuilderRemoteRelayEndpoint.Name); return nil })
+	set(BuilderSecondaryRemoteRelayEndpoints.Name, func() error { cfg.SecondaryRemoteRelayEndpoints = strings.Split(ctx.String(BuilderSecondaryRemoteRelayEndpoints.Name), ","); return nil })
+	set(BuilderRateLimitDuration.Name, func() error { cfg.BuilderRateLimitDuration = ctx.String(BuilderRateLimitDuration.Name); return nil })
+	set(BuilderRateLimitMaxBurst.Name, func() error { cfg.BuilderRateLimitMaxBurst = ctx.Int(BuilderRateLimitMaxBurst.Name); return nil })
+	set(BuilderBlockResubmitInterval.Name, func() error { cfg.BuilderRateLimitResubmitInterval = ctx.String(BuilderBlockResubmitInterval.Name); return nil })
+	set(BuilderSubmissionOffset.Name, func() error { cfg.BuilderSubmissionOffset = ctx.Duration(BuilderSubmissionOffset.Name); return nil })
+	set(BuilderDiscardRevertibleTxOnErr.Name, func() error { cfg.DiscardRevertibleTxOnErr = ctx.Bool(BuilderDiscardRevertibleTxOnErr.Name); return nil })
+	set(BuilderBlockProcessorURL.Name, func() error { cfg.BlockProcessorURL = ctx.String(BuilderBlockProcessorURL.Name); return nil })
 	if ctx.IsSet(BuilderBlacklist.Name) {
 		cfg.ValidationBlocklist = ctx.String(BuilderBlacklist.Name)
 	}
@@ -2204,13 +2219,6 @@ func SetBuilderConfig(ctx *cli.Context, cfg *builder.Config) {
 	}
 	cfg.ValidationUseCoinbaseDiff = ctx.Bool(BuilderBlockValidationUseBalanceDiff.Name)
 	cfg.ValidationExcludeWithdrawals = ctx.Bool(BuilderBlockValidationExcludeWithdrawals.Name)
-	cfg.BuilderRateLimitDuration = ctx.String(BuilderRateLimitDuration.Name)
-	cfg.BuilderRateLimitMaxBurst = ctx.Int(BuilderRateLimitMaxBurst.Name)
-	cfg.BuilderSubmissionOffset = ctx.Duration(BuilderSubmissionOffset.Name)
-	cfg.DiscardRevertibleTxOnErr = ctx.Bool(BuilderDiscardRevertibleTxOnErr.Name)
-	cfg.EnableCancellations = ctx.IsSet(BuilderEnableCancellations.Name)
-	cfg.BuilderRateLimitResubmitInterval = ctx.String(BuilderBlockResubmitInterval.Name)
-	cfg.BlockProcessorURL = ctx.String(BuilderBlockProcessorURL.Name)
 }
 
 // RegisterEthService adds an Ethereum client to the stack.

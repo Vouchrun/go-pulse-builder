@@ -232,6 +232,9 @@ func (miner *Miner) proposerTxPrepare(env *environment, validatorCoinbase common
 	if codeHash != (common.Hash{}) && codeHash != types.EmptyCodeHash {
 		return nil, errors.New("contract fee recipient not supported in naive builder mode")
 	}
+	if env.gasPool == nil {
+		env.gasPool = new(core.GasPool).AddGas(env.header.GasLimit)
+	}
 	gas := uint64(params.TxGas)
 	if err := env.gasPool.SubGas(gas); err != nil {
 		return nil, err
