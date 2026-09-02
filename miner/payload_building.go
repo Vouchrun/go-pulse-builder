@@ -43,6 +43,7 @@ type BuildPayloadArgs struct {
 	Random       common.Hash           // The provided randomness value
 	Withdrawals  types.Withdrawals     // The provided withdrawals
 	BeaconRoot   *common.Hash          // The provided beaconRoot (Cancun)
+	GasLimit     uint64                // Optional explicit gas limit (builder mode); 0 = derived from config
 	Version      engine.PayloadVersion // Versioning byte for payload id calculation.
 	// BlockHook, when set, is invoked with each newly sealed full block during
 	// payload building (flashbots builder mode). The block value passed is the
@@ -228,6 +229,7 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 		random:      args.Random,
 		withdrawals: args.Withdrawals,
 		beaconRoot:  args.BeaconRoot,
+		gasLimit:    args.GasLimit,
 		noTxs:       true,
 	}
 	empty := miner.generateWork(emptyParams, witness)
@@ -258,6 +260,7 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 			random:      args.Random,
 			withdrawals: args.Withdrawals,
 			beaconRoot:  args.BeaconRoot,
+			gasLimit:    args.GasLimit,
 			noTxs:       false,
 		}
 
