@@ -230,7 +230,7 @@ func (miner *Miner) proposerTxPrepare(env *environment, validatorCoinbase common
 	}
 	codeHash := env.state.GetCodeHash(validatorCoinbase)
 	if codeHash != (common.Hash{}) && codeHash != types.EmptyCodeHash {
-		return nil, fmt.Errorf("proposer payment: contract fee recipient %s not supported in naive builder mode", validatorCoinbase.Hex())
+		return nil, errors.New("contract fee recipient not supported in naive builder mode")
 	}
 	if env.gasPool == nil {
 		env.gasPool = new(core.GasPool).AddGas(env.header.GasLimit)
@@ -248,35 +248,27 @@ func (miner *Miner) proposerTxPrepare(env *environment, validatorCoinbase common
 // proposerTxCommit signs and appends the proposer-payment tx: an EIP-1559
 // transfer from the builder to the validator's fee recipient with gas tip 0,
 // fee cap = base fee, and value = the tips the builder earned during the fill.
-// All failures carry full diagnostics so the underlying cause is visible in the
-// logs instead of a bare "failed" message.
 func (miner *Miner) proposerTxCommit(env *environment, validatorCoinbase common.Address, reserve *proposerTxReservation) error {
 	if reserve == nil {
 		return nil
 	}
-	sender := env.coinbase
-	afterBalance := env.state.GetBalance(sender).ToBig()
-	availableFunds := new(big.Int).Sub(afterBalance, reserve.builderBalance)
+	availableFunds := new(big.Int).Sub(env.state.GetBalance(env.coinbase).ToBig(), reserve.builderBalance)
 	if availableFunds.Sign() <= 0 {
-		return fmt.Errorf("proposer payment: builder balance did not increase during fill (before %v after %v, recipient %s)",
-			reserve.builderBalance, afterBalance, validatorCoinbase.Hex())
+		return errors.New("builder balance decreased")
 	}
 	env.gasPool.AddGas(reserve.reservedGas)
 
 	baseFee := env.header.BaseFee
 	if baseFee == nil {
-		return fmt.Errorf("proposer payment: no base fee (recipient %s)", validatorCoinbase.Hex())
+		return errors.New("no base fee")
 	}
-	gasCost := new(big.Int).Mul(baseFee, new(big.Int).SetUint64(reserve.reservedGas))
-	amount := new(big.Int).Sub(availableFunds, gasCost)
+	amount := new(big.Int).Sub(availableFunds, new(big.Int).Mul(baseFee, new(big.Int).SetUint64(reserve.reservedGas)))
 	if amount.Sign() < 0 {
-		return fmt.Errorf("proposer payment: tips %v less than base-fee cost %v (baseFee %v gas %d, recipient %s)",
-			availableFunds, gasCost, baseFee, reserve.reservedGas, validatorCoinbase.Hex())
+		return errors.New("not enough funds for proposer payment")
 	}
-	nonce := env.state.GetNonce(sender)
 	tx, err := types.SignNewTx(miner.config.BuilderTxSigningKey, env.signer, &types.DynamicFeeTx{
 		ChainID:   miner.chainConfig.ChainID,
-		Nonce:     nonce,
+		Nonce:     env.state.GetNonce(env.coinbase),
 		GasTipCap: new(big.Int),
 		GasFeeCap: new(big.Int).Set(baseFee),
 		Gas:       reserve.reservedGas,
@@ -284,17 +276,14 @@ func (miner *Miner) proposerTxCommit(env *environment, validatorCoinbase common.
 		Value:     amount,
 	})
 	if err != nil {
-		return fmt.Errorf("proposer payment: signing failed (recipient %s, amount %v, nonce %d): %w",
-			validatorCoinbase.Hex(), amount, nonce, err)
+		return err
 	}
 	if err := miner.commitTransaction(env, tx); err != nil {
-		return fmt.Errorf("proposer payment: commit failed (recipient %s, amount %v, nonce %d): %w",
-			validatorCoinbase.Hex(), amount, nonce, err)
+		return err
 	}
 	receipt := env.receipts[len(env.receipts)-1]
 	if receipt.Status != types.ReceiptStatusSuccessful {
-		return fmt.Errorf("proposer payment tx failed: recipient %s amount %v sender %s senderBalance %v baseFee %v gas %d nonce %d receiptStatus %d gasUsed %d",
-			validatorCoinbase.Hex(), amount, sender.Hex(), afterBalance, baseFee, reserve.reservedGas, nonce, receipt.Status, receipt.GasUsed)
+		return errors.New("proposer payment tx failed")
 	}
 	return nil
 }
