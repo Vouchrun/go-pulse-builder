@@ -110,7 +110,24 @@ services:
       - "127.0.0.1:5055:5054"      # metrics - localhost only (production uses 5054); host:5055
       # NOTE: container port 5052 stays reachable on mev-net (not published to the
       # host) - the relay's gate exporter uses it as its BEACON_API default.
-    # NOTE: no --staking - no validator attaches to this stack.
+    # NOTE: no --staking - no validator attaches to this stack (by design: the
+    # builder's CL holds no validator keys).
+    #
+    # DUAL ROLE in the colocated pilot: (a) the builder's CL (drives the
+    # validation-node EL) and (b) the relay's beacon node for -beacon-uris
+    # (head + payload_attributes SSE, duties, and the getPayload publish path).
+    #
+    # A relay's beacon node has NO VC and MUST run --always-prepare-payload so
+    # payload_attributes events are emitted every slot - the relay rejects
+    # builder submissions without a cached event (checkSubmissionPayloadAttrs;
+    # upstream mev-boost-relay README "Beacon node setup").
+    # --prepare-payload-lookahead gives a full-slot build window (10000ms = one
+    # PulseChain slot, adapted from the README's 12000ms for 12s mainnet slots).
+    #
+    # PRODUCTION topology: the relay runs its OWN dedicated synced lighthouse
+    # with these same flags on the relay host - separate from both the builder's
+    # CL and the validator's beacon; the validator/production beacon is never a
+    # -beacon-uris target.
     # Re-enable ENR flags with a public IP once NAT is configured:
     #   --enr-address=${PUBIP}
     #   --enr-tcp-port=9007
@@ -119,6 +136,8 @@ services:
     command: >
       lighthouse bn
       --network=pulsechain
+      --always-prepare-payload
+      --prepare-payload-lookahead=10000
       --datadir=/data/lighthouse
       --execution-endpoint=http://validation-node:8552
       --execution-jwt=/data/jwt.hex
