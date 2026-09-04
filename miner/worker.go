@@ -213,79 +213,159 @@ func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPay
 	}
 }
 
+// proposerPaymentContractGasCap is the conservative gas cap reserved for a
+// proposer-payment transfer to a contract recipient. A value transfer to a
+// contract (e.g. the VFD fee distributor) costs more than the 21000 EOA base
+// gas; the exact gasUsed is measured by simulation during proposerTxCommit.
+const proposerPaymentContractGasCap = 100000
+
 // proposerTxReservation captures the builder state before the mempool fill so
 // the proposer-payment tx can pay out exactly the tips earned in this block.
 type proposerTxReservation struct {
 	builderBalance *big.Int
 	reservedGas    uint64
+	isContract     bool
 }
 
 // proposerTxPrepare reserves gas for the proposer-payment tx and records the
-// builder's balance before the mempool fill. EOA recipients only - contract
-// recipients need env-diff gas estimation (comes with the bundle machinery in
-// milestone 2).
+// builder's balance before the mempool fill. EOA recipients reserve the 21000
+// base gas; contract recipients (VFD-style fee distributors) reserve a
+// conservative cap so the fill leaves room - the exact gasUsed is measured by
+// simulation at commit time.
 func (miner *Miner) proposerTxPrepare(env *environment, validatorCoinbase common.Address) (*proposerTxReservation, error) {
 	if validatorCoinbase == (common.Address{}) {
 		return nil, nil
 	}
 	codeHash := env.state.GetCodeHash(validatorCoinbase)
-	if codeHash != (common.Hash{}) && codeHash != types.EmptyCodeHash {
-		return nil, errors.New("contract fee recipient not supported in naive builder mode")
-	}
+	isContract := codeHash != (common.Hash{}) && codeHash != types.EmptyCodeHash
 	if env.gasPool == nil {
 		env.gasPool = new(core.GasPool).AddGas(env.header.GasLimit)
 	}
 	gas := uint64(params.TxGas)
+	if isContract {
+		gas = proposerPaymentContractGasCap
+	}
 	if err := env.gasPool.SubGas(gas); err != nil {
 		return nil, err
 	}
 	return &proposerTxReservation{
 		builderBalance: env.state.GetBalance(env.coinbase).ToBig(),
 		reservedGas:    gas,
+		isContract:     isContract,
 	}, nil
 }
 
 // proposerTxCommit signs and appends the proposer-payment tx: an EIP-1559
 // transfer from the builder to the validator's fee recipient with gas tip 0,
-// fee cap = base fee, and value = the tips the builder earned during the fill.
+// fee cap = base fee, and value = the tips the builder earned during the fill
+// minus the payment tx's own base-fee burn. For contract recipients the exact
+// gasUsed is measured by simulating the transfer on a state copy first, so the
+// value closes the builder's balance exactly. All failures carry full
+// diagnostics so the underlying cause is visible in the logs instead of a bare
+// "failed" message - no bid is better than a bad bid.
 func (miner *Miner) proposerTxCommit(env *environment, validatorCoinbase common.Address, reserve *proposerTxReservation) error {
 	if reserve == nil {
 		return nil
 	}
-	availableFunds := new(big.Int).Sub(env.state.GetBalance(env.coinbase).ToBig(), reserve.builderBalance)
+	sender := env.coinbase
+	afterBalance := env.state.GetBalance(sender).ToBig()
+	availableFunds := new(big.Int).Sub(afterBalance, reserve.builderBalance)
 	if availableFunds.Sign() <= 0 {
-		return errors.New("builder balance decreased")
+		return fmt.Errorf("proposer payment: builder balance did not increase during fill (before %v after %v, recipient %s)",
+			reserve.builderBalance, afterBalance, validatorCoinbase.Hex())
 	}
 	env.gasPool.AddGas(reserve.reservedGas)
 
 	baseFee := env.header.BaseFee
 	if baseFee == nil {
-		return errors.New("no base fee")
+		return fmt.Errorf("proposer payment: no base fee (recipient %s)", validatorCoinbase.Hex())
 	}
-	amount := new(big.Int).Sub(availableFunds, new(big.Int).Mul(baseFee, new(big.Int).SetUint64(reserve.reservedGas)))
+	nonce := env.state.GetNonce(sender)
+
+	// Contract recipients: measure the exact gasUsed by simulating the
+	// transfer on a copy of the current state. The simulation is deterministic
+	// (identical state, same EVM rules), so the real tx uses exactly the
+	// simulated gas - a margin would break the balance-closing invariant
+	// value + baseFee*gasLimit == availableFunds.
+	gas := reserve.reservedGas
+	if reserve.isContract {
+		simGasUsed, err := miner.simulateProposerPayment(env, validatorCoinbase, availableFunds, baseFee, nonce, reserve.reservedGas)
+		if err != nil {
+			return err
+		}
+		gas = simGasUsed
+	}
+
+	gasCost := new(big.Int).Mul(baseFee, new(big.Int).SetUint64(gas))
+	amount := new(big.Int).Sub(availableFunds, gasCost)
 	if amount.Sign() < 0 {
-		return errors.New("not enough funds for proposer payment")
+		return fmt.Errorf("proposer payment: tips %v less than base-fee cost %v (baseFee %v gas %d, recipient %s)",
+			availableFunds, gasCost, baseFee, gas, validatorCoinbase.Hex())
 	}
 	tx, err := types.SignNewTx(miner.config.BuilderTxSigningKey, env.signer, &types.DynamicFeeTx{
 		ChainID:   miner.chainConfig.ChainID,
-		Nonce:     env.state.GetNonce(env.coinbase),
+		Nonce:     nonce,
 		GasTipCap: new(big.Int),
 		GasFeeCap: new(big.Int).Set(baseFee),
-		Gas:       reserve.reservedGas,
+		Gas:       gas,
 		To:        &validatorCoinbase,
 		Value:     amount,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("proposer payment: signing failed (recipient %s, amount %v, sender %s, senderBalance %v, baseFee %v, gas %d, nonce %d): %w",
+			validatorCoinbase.Hex(), amount, sender.Hex(), afterBalance, baseFee, gas, nonce, err)
 	}
 	if err := miner.commitTransaction(env, tx); err != nil {
-		return err
+		return fmt.Errorf("proposer payment: commit failed (recipient %s, amount %v, sender %s, senderBalance %v, baseFee %v, gas %d, nonce %d): %w",
+			validatorCoinbase.Hex(), amount, sender.Hex(), afterBalance, baseFee, gas, nonce, err)
 	}
 	receipt := env.receipts[len(env.receipts)-1]
 	if receipt.Status != types.ReceiptStatusSuccessful {
-		return errors.New("proposer payment tx failed")
+		return fmt.Errorf("proposer payment tx failed: recipient %s amount %v sender %s senderBalance %v baseFee %v gas %d nonce %d receiptStatus %d gasUsed %d",
+			validatorCoinbase.Hex(), amount, sender.Hex(), afterBalance, baseFee, gas, nonce, receipt.Status, receipt.GasUsed)
 	}
 	return nil
+}
+
+// simulateProposerPayment executes the proposer-payment transfer on a copy of
+// the builder's state to measure the exact gas a contract-recipient transfer
+// consumes. The simulated tx mirrors the real one (nonce, tip 0, fee cap =
+// base fee, value = availableFunds - baseFee*gasCap) so its balance check
+// passes exactly; the receipt's gasUsed is what the real tx will burn.
+func (miner *Miner) simulateProposerPayment(env *environment, recipient common.Address, availableFunds, baseFee *big.Int, nonce uint64, gasCap uint64) (uint64, error) {
+	gasCost := new(big.Int).Mul(baseFee, new(big.Int).SetUint64(gasCap))
+	provisionalValue := new(big.Int).Sub(availableFunds, gasCost)
+	if provisionalValue.Sign() < 0 {
+		return 0, fmt.Errorf("proposer payment: tips %v less than base-fee cost %v (baseFee %v gas %d, recipient %s)",
+			availableFunds, gasCost, baseFee, gasCap, recipient.Hex())
+	}
+	tx, err := types.SignNewTx(miner.config.BuilderTxSigningKey, env.signer, &types.DynamicFeeTx{
+		ChainID:   miner.chainConfig.ChainID,
+		Nonce:     nonce,
+		GasTipCap: new(big.Int),
+		GasFeeCap: new(big.Int).Set(baseFee),
+		Gas:       gasCap,
+		To:        &recipient,
+		Value:     provisionalValue,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("proposer payment: simulation signing failed (recipient %s, amount %v, nonce %d): %w",
+			recipient.Hex(), provisionalValue, nonce, err)
+	}
+
+	stateCopy := env.state.Copy()
+	simEVM := vm.NewEVM(core.NewEVMBlockContext(env.header, miner.chain, &env.coinbase), stateCopy, miner.chainConfig, vm.Config{})
+	var gasUsed uint64
+	receipt, err := core.ApplyTransaction(simEVM, new(core.GasPool).AddGas(gasCap), stateCopy, env.header, tx, &gasUsed)
+	if err != nil {
+		return 0, fmt.Errorf("proposer payment: simulation failed (recipient %s, amount %v, sender %s, senderBalance %v, baseFee %v, gas %d, nonce %d): %w",
+			recipient.Hex(), provisionalValue, env.coinbase.Hex(), env.state.GetBalance(env.coinbase).ToBig(), baseFee, gasCap, nonce, err)
+	}
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return 0, fmt.Errorf("proposer payment: simulation reverted (recipient %s, amount %v, sender %s, senderBalance %v, baseFee %v, gas %d, nonce %d, receiptStatus %d, gasUsed %d)",
+			recipient.Hex(), provisionalValue, env.coinbase.Hex(), env.state.GetBalance(env.coinbase).ToBig(), baseFee, gasCap, nonce, receipt.Status, receipt.GasUsed)
+	}
+	return receipt.GasUsed, nil
 }
 
 // prepareWork constructs the sealing task according to the given parameters,

@@ -206,22 +206,14 @@ func (b *Builder) Start() error {
 					if !b.ignoreLatePayloadAttributes {
 						err := b.OnPayloadAttribute(&payloadAttributes)
 						if err != nil {
-							log.Error("error with builder processing on payload attribute",
-								"latestSlot", currentSlot,
-								"processedSlot", payloadAttributes.Slot,
-								"headHash", payloadAttributes.HeadHash.String(),
-								"error", err)
+							logSlotProcessingError(err, currentSlot, payloadAttributes.Slot, payloadAttributes.HeadHash.String())
 						}
 					}
 				} else if payloadAttributes.Slot > currentSlot {
 					currentSlot = payloadAttributes.Slot
 					err := b.OnPayloadAttribute(&payloadAttributes)
 					if err != nil {
-						log.Error("error with builder processing on payload attribute",
-							"latestSlot", currentSlot,
-							"processedSlot", payloadAttributes.Slot,
-							"headHash", payloadAttributes.HeadHash.String(),
-							"error", err)
+						logSlotProcessingError(err, currentSlot, payloadAttributes.Slot, payloadAttributes.HeadHash.String())
 					}
 				}
 			}
@@ -229,6 +221,31 @@ func (b *Builder) Start() error {
 	}()
 
 	return b.relay.Start()
+}
+
+// logSlotProcessingError logs a payload-attribute processing failure. When the
+// relay has no registration for the slot's proposer (ErrValidatorNotFound) the
+// slot is expected - the beacon emits payload_attributes for every slot under
+// --always-prepare-payload, but this builder only builds for proposers it can
+// resolve from the relay's registrations - so it is logged at Debug and the
+// slot is skipped. This also covers the wrapped "could not get validator while
+// submitting block for slot N" variant from OnPayloadAttribute. Genuine
+// failures keep the Error level.
+func logSlotProcessingError(err error, latestSlot, processedSlot uint64, headHash string) {
+	if errors.Is(err, ErrValidatorNotFound) {
+		log.Debug("skipping payload attribute, proposer not registered with relay",
+			"latestSlot", latestSlot,
+			"processedSlot", processedSlot,
+			"headHash", headHash,
+		)
+		return
+	}
+	log.Error("error with builder processing on payload attribute",
+		"latestSlot", latestSlot,
+		"processedSlot", processedSlot,
+		"headHash", headHash,
+		"error", err,
+	)
 }
 
 func (b *Builder) Stop() error {
