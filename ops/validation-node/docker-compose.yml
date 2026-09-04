@@ -39,7 +39,7 @@ volumes:
 services:
 
   validation-node:
-    image: vouchrun/go-pulse-builder:pulse-3592f5cf7
+    image: vouchrun/go-pulse-builder:pulse-173fe92b4
     container_name: validation-node
     restart: unless-stopped
     stop_grace_period: 2m          # clean db shutdown
@@ -128,6 +128,9 @@ services:
     # with these same flags on the relay host - separate from both the builder's
     # CL and the validator's beacon; the validator/production beacon is never a
     # -beacon-uris target.
+    # --suggested-fee-recipient is a junk EOA for always-prepare-payload engine
+    # builds (lighthouse's default junk is precompile 0x01 whose transfer
+    # reverts; this CL never proposes, so funds are never at stake).
     # Re-enable ENR flags with a public IP once NAT is configured:
     #   --enr-address=${PUBIP}
     #   --enr-tcp-port=9007
@@ -137,6 +140,7 @@ services:
       lighthouse bn
       --network=pulsechain
       --always-prepare-payload
+      --suggested-fee-recipient=0x000000000000000000000000000000000000dEaD
       --prepare-payload-lookahead=10000
       --datadir=/data/lighthouse
       --execution-endpoint=http://validation-node:8552
